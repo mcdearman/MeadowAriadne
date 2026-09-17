@@ -1,0 +1,219 @@
+-- Sources and caches: the text a report points into, split into lines, and
+-- how a report finds the text for each span. The crate's `src/source.rs`.
+--
+-- Copyright Joshua Barretto and the ariadne contributors, and the Meadow
+-- port's authors. Licensed under MIT: see LICENSE and COPYRIGHT.
+
+use Std.Collections.Vector as V
+use Std.String as S
+use Std.Char as C
+
+-- A place in a source: the source's id, and a range of offsets in it, from
+-- `start` up to but not including `stop`. Offsets count characters or bytes,
+-- as the report's `Config` says.
+@pub record Span id = { source : id, start : Int, stop : Int }
+
+-- A span of the one source a report without ids points into.
+@pub fun span start stop = Span { source = (), start = start, stop = stop }
+
+-- A span of the source `id`.
+@pub fun spanIn id start stop = Span { source = id, start = start, stop = stop }
+
+-- The span's length, or 0 if it ends before it starts.
+@pub fun spanLen (s : Span id) = if s.stop > s.start then s.stop - s.start else 0
+
+-- One line of a source, with its terminator: where it starts and how long it
+-- is, in characters and in bytes.
+@pub record Line = { offset : Int, charLen : Int, byteOffset : Int, byteLen : Int }
+
+-- The character offset the line starts at.
+@pub fun lineOffset (l : Line) = l.offset
+
+-- The line's length in characters, terminator included.
+@pub fun lineLen (l : Line) = l.charLen
+
+-- The character offsets the line covers, as `(start, stop)`.
+@pub fun lineSpan (l : Line) = (l.offset, l.offset + l.charLen)
+
+-- A source text, split into lines.
+@pub record Source = { text : String, lines : [Line], len : Int, byteLen : Int, displayLineOffset : Int }
+
+-- The number of bytes UTF-8 takes for the character with code `n`.
+fun utf8Len n = if n < 128 then 1 else if n < 2048 then 2 else if n < 65536 then 3 else 4
+
+-- The characters a line may end with: carriage return, line feed, vertical
+-- tab, form feed, next line, line separator and paragraph separator.
+fun isSeparator n = (n >= 10 and n <= 13) or n == 133 or n == 8232 or n == 8233
+
+-- `text` as a source. Each line ends after a separator, except that a
+-- carriage return and a line feed end one line together; an empty text is one
+-- empty line.
+@pub fun source text =
+  let cs = stringToChars text in
+  let n = arrayLen cs in
+  let rec go i charOffset byteOffset lineChars lineBytes acc =
+    if i >= n
+    then
+      let last =
+        if lineChars > 0
+        then
+          V.pushBack
+            acc
+            (Line { offset = charOffset, charLen = lineChars, byteOffset = byteOffset, byteLen = lineBytes })
+        else acc
+      in
+      (last, charOffset + lineChars, byteOffset + lineBytes)
+    else
+      let code = C.code (arrayGet cs i) in
+      let chars = lineChars + 1 in
+      let bytes = lineBytes + utf8Len code in
+      if isSeparator code
+      then
+        let crlf = code == 13 and i + 1 < n and C.code (arrayGet cs (i + 1)) == 10 in
+        let (total : Int) = if crlf then chars + 1 else chars in
+        let totalBytes = if crlf then bytes + 1 else bytes in
+        let skip = if crlf then 2 else 1 in
+        let l = Line { offset = charOffset, charLen = total, byteOffset = byteOffset, byteLen = totalBytes } in
+        go (i + skip) (charOffset + total) (byteOffset + totalBytes) 0 0 (V.pushBack acc l)
+      else go (i + 1) charOffset byteOffset chars bytes acc
+  in
+  if n == 0
+  then
+    Source {
+      text = text,
+      lines = [Line { offset = 0, charLen = 0, byteOffset = 0, byteLen = 0 }],
+      len = 0,
+      byteLen = 0,
+      displayLineOffset = 0
+    }
+  else
+    match go 0 0 0 0 0 V.empty with
+    | (lines, len, byteLen) ->
+        Source { text = text, lines = lines, len = len, byteLen = byteLen, displayLineOffset = 0 }
+
+-- The source, with its line numbers shown `offset` higher than they are.
+@pub fun withDisplayLineOffset offset (s : Source) = { s | displayLineOffset = offset }
+
+-- The source's text.
+@pub fun sourceText (s : Source) = s.text
+
+-- The source's length in characters.
+@pub fun sourceLen (s : Source) = s.len
+
+-- The line at `idx`, counting from 0.
+@pub fun line idx (s : Source) = if idx >= 0 then V.get s.lines idx else None
+
+-- The source's lines.
+@pub fun sourceLines (s : Source) = s.lines
+
+-- The index of the last line whose start `key` gives as no later than
+-- `offset`: the crate's binary search.
+fun lineAt key offset (s : Source) =
+  let rec search lo hi =
+    if lo >= hi
+    then lo
+    else
+      let mid = (lo + hi) / 2 in
+      match V.get s.lines mid with
+      | Just l if key l <= offset -> search (mid + 1) hi
+      | _ -> search lo mid
+  in
+  let after = search 0 (V.len s.lines) in
+  if after > 0 then after - 1 else 0
+
+-- The line holding the character at `offset`, its index, and the offset's
+-- column in it; `None` past the end of the source. The end itself is on the
+-- last line.
+@pub fun offsetLine offset (s : Source) =
+  if offset < 0 or offset > s.len
+  then None
+  else
+    let idx = lineAt (\(l : Line) -> l.offset) offset s in
+    match line idx s with
+    | Just l -> Just (l, idx, offset - l.offset)
+    | None -> None
+
+-- The same, for the byte at `byteOffset`.
+@pub fun byteLine byteOffset (s : Source) =
+  if byteOffset < 0 or byteOffset > s.byteLen
+  then None
+  else
+    let idx = lineAt (\(l : Line) -> l.byteOffset) byteOffset s in
+    match line idx s with
+    | Just l -> Just (l, idx, byteOffset - l.byteOffset)
+    | None -> None
+
+-- The indices of the lines `sp` covers, as `(first, stop)`.
+@pub fun lineRange (sp : Span id) (s : Source) =
+  let first =
+    match offsetLine sp.start s with
+    | Just (_, idx, _) -> idx
+    | None -> 0
+  in
+  let lastOffset = if sp.stop - 1 > sp.start then sp.stop - 1 else sp.start in
+  let stop =
+    match offsetLine lastOffset s with
+    | Just (_, idx, _) -> idx + 1
+    | None -> V.len s.lines
+  in
+  (first, stop)
+
+-- The text of `l`, terminator included.
+@pub fun lineText (l : Line) (s : Source) = S.slice s.text l.byteOffset (l.byteOffset + l.byteLen)
+
+-- How a report gets the source for an id, and what it calls the source. The
+-- crate's `Cache` trait. `fetch` gives the reason when there is no source.
+@pub record Cache id = { fetch : id -> Result String Source, display : id -> Maybe String }
+
+-- The source a report without ids points into, which has no name.
+@pub fun sourceCache (s : Source) = Cache { fetch = \_ -> Ok s, display = \_ -> None }
+
+fun missing name = Err "Failed to fetch source '${name}'"
+
+-- The one source `name`.
+@pub fun namedSource name (s : Source) =
+  Cache { fetch = \id -> if id == name then Ok s else missing id, display = \id -> Just id }
+
+-- Sources by name, from pairs of a name and its text: the crate's `sources`.
+@pub fun sources pairs =
+  let table = V.map (\(name, text) -> (name, source text)) pairs in
+  Cache {
+    fetch =
+      \id ->
+        match V.find (\(name, _) -> name == id) table with
+        | Just (_, s) -> Ok s
+        | None -> missing id,
+    display = \id -> Just id
+  }
+
+-- Sources got from `get`, named by their ids: the crate's `FnCache`, but
+-- without the cache, since `get` is pure.
+@pub fun fnCache get =
+  Cache {
+    fetch =
+      \id ->
+        match get id with
+        | Ok text -> Ok (source text)
+        | Err e -> Err e,
+    display = \id -> Just id
+  }
+
+-- The files at `paths`, read now and named by their paths: the crate's
+-- `FileCache`, which reads them when they are first wanted. A file that could
+-- not be read is missing from the cache.
+@pub fun fileCache paths =
+  let read =
+    \p ->
+      match readToString p with
+      | Ok text -> Just (source text)
+      | Err _ -> None
+  in
+  let files = V.map (\p -> (p, read p)) paths in
+  Cache {
+    fetch =
+      \id ->
+        match V.find (\(p, _) -> p == id) files with
+        | Just (_, Just s) -> Ok s
+        | _ -> Err "could not read ${id}",
+    display = \id -> Just id
+  }

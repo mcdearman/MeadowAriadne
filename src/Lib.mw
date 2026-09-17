@@ -1,0 +1,40 @@
+-- ariadne: fancy diagnostics for compilers and other tools that point into
+-- text. A port of Rust's `ariadne` crate, version 0.6.0, measuring text with
+-- this ecosystem's `unicodeWidth`.
+--
+--   use ariadne (build, withMessage, withLabel, label, labelMessage, spanIn, sources, render)
+--
+--   def report =
+--     build Error (spanIn "a.mw" 8 11)
+--       |> withMessage "unknown name"
+--       |> withLabel (label (spanIn "a.mw" 8 11) |> labelMessage "not in scope")
+--
+--   render report (sources [("a.mw", "def x = foo\n")])
+--     -- Error: unknown name
+--     --    ╭─[ a.mw:1:9 ]
+--     --    │
+--     --  1 │ def x = foo
+--     --    │         ─┬─
+--     --    │          ╰─── not in scope
+--     -- ───╯
+--
+-- (with colour escapes, unless the configuration turns colour off).
+
+mod Color
+mod Source
+mod Report
+mod Write
+@cfg(test)
+mod Cases
+@cfg(test)
+mod Tests
+
+@pub use ariadne.Color
+@pub use ariadne.Color.Color.*
+@pub use ariadne.Source
+@pub use ariadne.Report
+@pub use ariadne.Report.LabelAttach.*
+@pub use ariadne.Report.CharSet.*
+@pub use ariadne.Report.IndexType
+@pub use ariadne.Report.ReportKind.*
+@pub use ariadne.Write (Characters, unicodeCharacters, asciiCharacters, render, print)

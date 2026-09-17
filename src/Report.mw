@@ -1,0 +1,197 @@
+-- Reports, labels and their configuration: the crate's `src/lib.rs`.
+--
+-- Copyright Joshua Barretto and the ariadne contributors, and the Meadow
+-- port's authors. Licensed under MIT: see LICENSE and COPYRIGHT.
+
+use Std.Collections.Vector as V
+use Std.String as S
+use ariadne.Color
+use ariadne.Source (Span)
+
+-- Where a label's arrow meets its span on the line: at its first character,
+-- its middle, or its last.
+@pub data LabelAttach = Start | Middle | End
+
+-- The characters reports are drawn with.
+@pub data CharSet = Unicode | Ascii
+
+-- What span offsets count: bytes of UTF-8, or characters.
+@pub data IndexType = Byte | Char
+
+-- How a report is drawn.
+@pub record Config = {
+  crossGap : Bool,
+  labelAttach : LabelAttach,
+  compact : Bool,
+  underlines : Bool,
+  multilineArrows : Bool,
+  color : Bool,
+  tabWidth : Int,
+  charSet : CharSet,
+  indexType : IndexType
+}
+
+-- The crate's default: gaps where arrows cross, arrows at the middle of their
+-- spans, not compact, underlined, arrows on multi-line spans, in colour, tabs
+-- of 4, Unicode characters, and character offsets.
+@pub def config =
+  Config {
+    crossGap = True,
+    labelAttach = LabelAttach.Middle,
+    compact = False,
+    underlines = True,
+    multilineArrows = True,
+    color = True,
+    tabWidth = 4,
+    charSet = CharSet.Unicode,
+    indexType = IndexType.Char
+  }
+
+-- Whether a horizontal arrow that crosses a vertical one leaves a gap there,
+-- rather than a crossing.
+@pub fun withCrossGap b (c : Config) = { c | crossGap = b }
+
+@pub fun withLabelAttach a (c : Config) = { c | labelAttach = a }
+
+-- Whether to leave out the blank lines and spacing that make a report easier
+-- to read.
+@pub fun withCompact b (c : Config) = { c | compact = b }
+
+-- Whether to underline labelled spans.
+@pub fun withUnderlines b (c : Config) = { c | underlines = b }
+
+-- Whether the arrows of multi-line spans start with an arrowhead.
+@pub fun withMultilineArrows b (c : Config) = { c | multilineArrows = b }
+
+-- Whether to draw in colour. Without it, the colours of the report's labels
+-- added after this are dropped, and so are the report's own, except for a
+-- custom kind's.
+@pub fun withColor b (c : Config) = { c | color = b }
+
+-- The columns a tab stop is apart. The crate fails on 0; here it is taken
+-- as 1.
+@pub fun withTabWidth n (c : Config) = { c | tabWidth = if n < 1 then 1 else n }
+
+@pub fun withCharSet s (c : Config) = { c | charSet = s }
+
+@pub fun withIndexType t (c : Config) = { c | indexType = t }
+
+fun ifColor (c : Config) color = if c.color then Just color else None
+
+@pub(pkg) fun errorColor c = ifColor c Color.Red
+
+@pub(pkg) fun warningColor c = ifColor c Color.Yellow
+
+@pub(pkg) fun adviceColor c = ifColor c (Color.Fixed 147)
+
+@pub(pkg) fun marginColor c = ifColor c (Color.Fixed 246)
+
+@pub(pkg) fun skippedMarginColor c = ifColor c (Color.Fixed 240)
+
+@pub(pkg) fun unimportantColor c = ifColor c (Color.Fixed 249)
+
+@pub(pkg) fun noteColor c = ifColor c (Color.Fixed 115)
+
+-- A labelled span of a report.
+@pub record Label id = { span : Span id, msg : Maybe String, color : Maybe Color, order : Int, priority : Int }
+
+-- A label on `sp`, with no message. The crate fails on a span that ends
+-- before it starts; here such a span ends where it starts.
+@pub fun label (sp : Span id) =
+  let fixed = if sp.stop < sp.start then { sp | stop = sp.start } else sp in
+  Label { span = fixed, msg = None, color = None, order = 0, priority = 0 }
+
+-- The message shown at the end of the label's arrow. A label without one has
+-- no arrow.
+@pub fun labelMessage m (l : Label id) = { l | msg = Just m }
+
+-- The colour the label's span and arrow are drawn in.
+@pub fun labelColor c (l : Label id) = { l | color = Just c }
+
+-- Where the label comes among the others: labels are sorted by order, lowest
+-- first, and otherwise keep the order they were added in.
+@pub fun labelOrder n (l : Label id) = { l | order = n }
+
+-- Which label's colour wins where spans overlap: the highest priority, and
+-- then the shortest span.
+@pub fun labelPriority n (l : Label id) = { l | priority = n }
+
+-- What a report is: its title and colour.
+@pub data ReportKind = Error | Warning | Advice | Custom String Color
+
+@pub fun kindName k =
+  match k with
+  | ReportKind.Error -> "Error"
+  | ReportKind.Warning -> "Warning"
+  | ReportKind.Advice -> "Advice"
+  | ReportKind.Custom name _ -> name
+
+-- A diagnostic: a kind, a message, labelled spans in sources, and notes and
+-- help to follow them.
+@pub record Report id = {
+  kind : ReportKind,
+  code : Maybe String,
+  msg : Maybe String,
+  notes : [String],
+  help : [String],
+  span : Span id,
+  labels : [Label id],
+  config : Config
+}
+
+-- A report of `kind`, located at `sp`. Build it up with the `with` functions
+-- below.
+@pub fun build kind (sp : Span id) =
+  Report {
+    kind = kind,
+    code = None,
+    msg = None,
+    notes = [],
+    help = [],
+    span = sp,
+    labels = [],
+    config = config
+  }
+
+-- The finished report. The builder is the report itself, so this changes
+-- nothing; it is kept for the crate's shape.
+@pub fun finish (r : Report id) = r
+
+-- `s` padded with spaces to at least two characters, as the crate formats a
+-- code with `{:02}`.
+fun padCode s = if arrayLen (stringToChars s) < 2 then S.concat s (S.repeat " " (2 - arrayLen (stringToChars s))) else s
+
+-- The report's code, shown before its kind.
+@pub fun withCode c (r : Report id) = { r | code = Just (padCode c) }
+
+-- A numeric code, zero-padded to two digits as the crate does.
+@pub fun withNumericCode n (r : Report id) =
+  let text = if n >= 0 and n < 10 then "0${n}" else "${n}" in
+  { r | code = Just text }
+
+@pub fun withMessage m (r : Report id) = { r | msg = Just m }
+
+-- The note, in place of any before it.
+@pub fun setNote n (r : Report id) = { r | notes = [n] }
+
+@pub fun withNote n (r : Report id) = { r | notes = V.pushBack r.notes n }
+
+@pub fun withNotes ns (r : Report id) = { r | notes = V.append r.notes ns }
+
+-- The help, in place of any before it.
+@pub fun setHelp h (r : Report id) = { r | help = [h] }
+
+@pub fun withHelp h (r : Report id) = { r | help = V.pushBack r.help h }
+
+@pub fun withHelps hs (r : Report id) = { r | help = V.append r.help hs }
+
+-- A label, whose colour is dropped if the report's configuration so far is
+-- not in colour.
+@pub fun withLabel (l : Label id) (r : Report id) =
+  let c = r.config in
+  let kept = if c.color then l else { l | color = None } in
+  { r | labels = V.pushBack r.labels kept }
+
+@pub fun withLabels ls (r : Report id) = V.foldl (\acc l -> withLabel l acc) r ls
+
+@pub fun withConfig c (r : Report id) = { r | config = c }

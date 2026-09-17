@@ -1,0 +1,791 @@
+-- Drawing a report: the crate's `src/write.rs` and the characters of
+-- `src/draw.rs`. The crate calls this code a thicket of implicit invariants,
+-- with known bugs; the port follows it step for step, bugs included, so that
+-- reports come out as the crate draws them.
+--
+-- Copyright Joshua Barretto and the ariadne contributors, and the Meadow
+-- port's authors. Licensed under MIT: see LICENSE and COPYRIGHT.
+
+use Std.Collections.Vector as V
+use Std.String as S
+use Std.Char as C
+use Std.Sort (stableSortBy)
+use Std.Maybe (isSome)
+use unicodeWidth (charWidth)
+use ariadne.Color
+use ariadne.Source
+use ariadne.Report
+
+-- --- characters ---------------------------------------------------------------------------
+
+-- The characters a report is drawn with.
+@pub record Characters = {
+  hbar : Char,
+  vbar : Char,
+  xbar : Char,
+  vbarBreak : Char,
+  vbarGap : Char,
+  uarrow : Char,
+  rarrow : Char,
+  ltop : Char,
+  mtop : Char,
+  rtop : Char,
+  lbot : Char,
+  rbot : Char,
+  mbot : Char,
+  lbox : Char,
+  rbox : Char,
+  lcross : Char,
+  rcross : Char,
+  underbar : Char,
+  underline : Char
+}
+
+@pub def unicodeCharacters =
+  Characters {
+    hbar = '─',
+    vbar = '│',
+    xbar = '┼',
+    vbarBreak = '┆',
+    vbarGap = '┆',
+    uarrow = '▲',
+    rarrow = '▶',
+    ltop = '╭',
+    mtop = '┬',
+    rtop = '╮',
+    lbot = '╰',
+    rbot = '╯',
+    mbot = '┴',
+    lbox = '[',
+    rbox = ']',
+    lcross = '├',
+    rcross = '┤',
+    underbar = '┬',
+    underline = '─'
+  }
+
+@pub def asciiCharacters =
+  Characters {
+    hbar = '-',
+    vbar = '|',
+    xbar = '+',
+    vbarBreak = '*',
+    vbarGap = ':',
+    uarrow = '^',
+    rarrow = '>',
+    ltop = ',',
+    mtop = 'v',
+    rtop = '.',
+    lbot = '`',
+    rbot = '\'',
+    mbot = '^',
+    lbox = '[',
+    rbox = ']',
+    lcross = '|',
+    rcross = '|',
+    underbar = '|',
+    underline = '^'
+  }
+
+-- --- text ---------------------------------------------------------------------------------
+
+fun ch c = C.toString c
+
+fun spaces n = if n > 0 then S.repeat " " n else ""
+
+-- Unicode's `White_Space` property, as Rust's `char::is_whitespace` has it.
+fun isWhitespace c =
+  let n = C.code c in
+  (n >= 9 and n <= 13)
+    or n == 32
+    or n == 133
+    or n == 160
+    or n == 5760
+    or (n >= 8192 and n <= 8202)
+    or n == 8232
+    or n == 8233
+    or n == 8239
+    or n == 8287
+    or n == 12288
+
+-- The characters of `s`, without the whitespace at its end.
+fun trimmedChars s =
+  let cs = stringToChars s in
+  let rec stop n = if n > 0 and isWhitespace (arrayGet cs (n - 1)) then stop (n - 1) else n in
+  arraySlice cs 0 (stop (arrayLen cs))
+
+-- The lines of `s` as Rust's `str::lines` splits them: at each line feed,
+-- dropping a carriage return before it, with no line after a final one.
+fun rustLines s =
+  let pieces = S.split "\n" s in
+  let n = V.len pieces in
+  let stripped =
+    V.map
+      (\(i, p) -> if i < n - 1 and S.endsWith "\r" p then S.slice p 0 (S.byteLength p - 1) else p)
+      (V.zip (V.range 0 n) pieces)
+  in
+  if n > 0 and V.getOr "" pieces (n - 1) == "" then V.take stripped (n - 1) else stripped
+
+-- The number of characters that start before byte `k` of `s`.
+fun charsBefore s k =
+  let cs = stringToChars s in
+  let n = arrayLen cs in
+  let rec go i at =
+    if i >= n or at >= k
+    then i
+    else
+      let code = C.code (arrayGet cs i) in
+      go (i + 1) (at + (if code < 128 then 1 else if code < 2048 then 2 else if code < 65536 then 3 else 4))
+  in
+  go 0 0
+
+-- The character to draw for `c` at column `col`, and how many times: a tab
+-- is spaces to the next tab stop, other whitespace is one space, and other
+-- characters are as wide as they are.
+fun charWidthAt (cfg : Config) c col =
+  if C.code c == 9
+  then (' ', (col / cfg.tabWidth + 1) * cfg.tabWidth - col)
+  else if isWhitespace c
+  then (' ', 1)
+  else
+    match charWidth c with
+    | Just w -> (c, w)
+    | None -> (c, 1)
+
+-- --- labels -------------------------------------------------------------------------------
+
+-- A label placed in its source: `id` tells labels apart, as the crate does by
+-- address.
+record LabelInfo = {
+  id : Int,
+  multi : Bool,
+  start : Int,
+  stop : Int,
+  msg : Maybe String,
+  color : Maybe Color,
+  order : Int,
+  priority : Int,
+  line : Int
+}
+
+fun lastOffset (l : LabelInfo) = if l.stop - 1 > l.start then l.stop - 1 else l.start
+
+fun infoLen (l : LabelInfo) = if l.stop > l.start then l.stop - l.start else 0
+
+fun covers (l : LabelInfo) offset = l.start <= offset and offset < l.stop
+
+fun within (lo, hi) x = lo <= x and x < hi
+
+-- The labels of one source, and the characters they cover together.
+record Group id = { source : id, src : Source, start : Int, stop : Int, labels : [LabelInfo] }
+
+-- Where `l` is, as `(start, stop, first line, last line)` in characters, if
+-- its source has it.
+fun placeLabel (cfg : Config) (src : Source) (l : Label id) =
+  let sp = l.span in
+  match cfg.indexType with
+  | IndexType.Char ->
+      (match offsetLine sp.start src with
+       | None -> None
+       | Just (_, startLine, _) ->
+           if sp.start >= sp.stop
+           then Just (sp.start, sp.stop, startLine, startLine)
+           else
+             match offsetLine (sp.stop - 1) src with
+             | None -> None
+             | Just (_, endLine, _) -> Just (sp.start, sp.stop, startLine, endLine))
+  | IndexType.Byte ->
+      match byteLine sp.start src with
+      | None -> None
+      | Just (startObj, startLine, startCol) ->
+          let startText = lineText startObj src in
+          let startOffset = startObj.offset + charsBefore startText startCol in
+          if sp.start >= sp.stop
+          then Just (startOffset, startOffset, startLine, startLine)
+          else
+            match byteLine (sp.stop - 1) src with
+            | None -> None
+            | Just (endObj, endLine, endCol) ->
+                let endText = lineText endObj src in
+                Just (startOffset, endObj.offset + charsBefore endText (endCol + 1), startLine, endLine)
+
+-- The report's labels, in order, grouped into runs in one source.
+fun sourceGroups (r : Report id) (cache : Cache id) =
+  let cfg = r.config in
+  let placed =
+    V.foldl
+      (\acc (i, (l : Label id)) ->
+        match cache.fetch l.span.source with
+        | Err _ -> acc
+        | Ok src ->
+            match placeLabel cfg src l with
+            | None -> acc
+            | Just (start, stop, startLine, endLine) ->
+                let info =
+                  LabelInfo {
+                    id = i,
+                    multi = startLine != endLine,
+                    start = start,
+                    stop = stop,
+                    msg = l.msg,
+                    color = l.color,
+                    order = l.order,
+                    priority = l.priority,
+                    line = endLine
+                  }
+                in
+                V.pushBack acc (info, l.span.source, src))
+      V.empty
+      (V.zip (V.range 0 (V.len r.labels)) r.labels)
+  in
+  let sorted = stableSortBy (\((a : LabelInfo), _, _) ((b : LabelInfo), _, _) -> compare a.order b.order) placed in
+  V.foldl
+    (\groups ((info : LabelInfo), sourceId, src) ->
+      let n = V.len groups in
+      let fresh = Group { source = sourceId, src = src, start = info.start, stop = info.stop, labels = [info] } in
+      match V.get groups (n - 1) with
+      | Just (g : Group id) ->
+          let fits =
+            match V.get g.labels (V.len g.labels - 1) with
+            | Just (last : LabelInfo) -> last.line <= info.line
+            | None -> True
+          in
+          if g.source == sourceId and fits
+          then
+            V.set
+              groups
+              (n - 1)
+              {
+                g |
+                start = min g.start info.start,
+                stop = max g.stop info.stop,
+                labels = V.pushBack g.labels info
+              }
+          else V.pushBack groups fresh
+      | None -> V.pushBack groups fresh)
+    V.empty
+    sorted
+
+-- A label as it is drawn on one line: the column its arrow leaves from, and
+-- whether it is a multi-line span and draws its message here.
+record LineLabel = { col : Int, info : LabelInfo, multi : Bool, drawMsg : Bool }
+
+fun isMargin (marginLabel : Maybe LineLabel) (l : LabelInfo) =
+  match marginLabel with
+  | Just (m : LineLabel) -> m.info.id == l.id
+  | None -> False
+
+-- The first of `xs` with the least `(a, b)` key.
+fun firstLeast key xs =
+  V.foldl
+    (\best x ->
+      match best with
+      | None -> Just x
+      | Just b ->
+          (match (key x, key b) with
+           | ((x1, x2), (b1, b2)) -> if x1 < b1 or (x1 == b1 and x2 < b2) then Just x else best))
+    None
+    xs
+
+-- --- drawing ------------------------------------------------------------------------------
+
+-- What drawing one group needs.
+record Ctx = {
+  cfg : Config,
+  draw : Characters,
+  lineNoWidth : Int,
+  src : Source,
+  multiWithMsg : [LabelInfo]
+}
+
+fun painted color c = fg color (ch c)
+
+-- Keeps `current`, or else takes `l` if `cond`.
+fun orLabel current cond (l : LabelInfo) =
+  match current with
+  | Just x -> Just x
+  | None -> if cond then Just l else None
+
+fun rowOf (lineLabels : [LineLabel]) (l : LabelInfo) =
+  let rec go i =
+    match V.get lineLabels i with
+    | None -> 0
+    | Just (ll : LineLabel) -> if ll.info.id == l.id then i else go (i + 1)
+  in
+  go 0
+
+-- What column `col` of the margin shows: the corner, horizontal bar,
+-- vertical bar and margin label the crate's `write_margin` finds.
+fun columnParts (x : Ctx) col isLine reportRow lineLabels marginLabel lineSpan =
+  let limit = min (col + 1) (V.len x.multiWithMsg) in
+  let rec go i corner hbar vbar marginPtr =
+    if i >= limit
+    then (corner, hbar, vbar, marginPtr)
+    else
+      match V.get x.multiWithMsg i with
+      | None -> (corner, hbar, vbar, marginPtr)
+      | Just (label : LabelInfo) ->
+          if not (label.start <= snd lineSpan and label.stop > fst lineSpan)
+          then go (i + 1) corner hbar vbar marginPtr
+          else
+            let isParent = i != col in
+            let isStart = within lineSpan label.start in
+            let isEnd = within lineSpan (lastOffset label) in
+            let margin = if isMargin marginLabel label then marginLabel else None in
+            match (margin, reportRow) with
+            | (Just (m : LineLabel), _) if isLine -> go (i + 1) corner hbar vbar (Just (m, isStart))
+            | _ if not isStart and (not isEnd or isLine) ->
+                go (i + 1) corner hbar (orLabel vbar (not isParent) label) marginPtr
+            | (_, None) -> go (i + 1) corner hbar vbar marginPtr
+            | (_, Just (row, isArrow)) ->
+                let labelRow = rowOf lineLabels label in
+                if row == labelRow
+                then
+                  let vbar2 =
+                    match margin with
+                    | Just (m : LineLabel) -> if col == i then Just m.info else None
+                    | None -> vbar
+                  in
+                  if isSome margin and isStart
+                  then go (i + 1) corner hbar vbar2 marginPtr
+                  else if isArrow
+                  then go (i + 1) (if isParent then corner else Just (label, isStart)) (Just label) vbar2 marginPtr
+                  else if not isStart
+                  then go (i + 1) corner hbar (orLabel vbar2 (not isParent) label) marginPtr
+                  else go (i + 1) corner hbar vbar2 marginPtr
+                else
+                  let cond = not isParent and (isStart != (row < labelRow)) in
+                  go (i + 1) corner hbar (orLabel vbar cond label) marginPtr
+  in
+  go 0 None None None None
+
+fun sameAs (m : Maybe LabelInfo) (l : LabelInfo) =
+  match m with
+  | Just x -> x.id == l.id
+  | None -> False
+
+-- One column of the margin's multi-line part, as the two characters drawn.
+fun marginColumn (x : Ctx) col isLine isEllipsis reportRow lineLabels marginLabel lineSpan =
+  let d = x.draw in
+  let n = V.len x.multiWithMsg in
+  let multiLabel = V.get x.multiWithMsg col in
+  match columnParts x col isLine reportRow lineLabels marginLabel lineSpan with
+  | (corner, hbar0, vbar, marginPtr) ->
+      let hbar1 =
+        match marginPtr with
+        | Just ((m : LineLabel), _) ->
+            if isLine and not (sameAs multiLabel m.info) and not (col + 1 == n)
+            then orLabel hbar0 True m.info
+            else hbar0
+        | None -> hbar0
+      in
+      let hbar =
+        match hbar1 with
+        | Just (l : LabelInfo) -> if not (isMargin marginLabel l) or not isLine then hbar1 else None
+        | None -> None
+      in
+      match (corner, hbar, vbar, marginPtr) with
+      | (Just ((l : LabelInfo), isStart), _, _, _) ->
+          (painted l.color (if isStart then d.ltop else d.lbot), painted l.color d.hbar)
+      | (_, Just (l : LabelInfo), Just _, _) if not x.cfg.crossGap ->
+          (painted l.color d.xbar, painted l.color d.hbar)
+      | (_, Just (l : LabelInfo), _, _) -> (painted l.color d.hbar, painted l.color d.hbar)
+      | (_, _, Just (l : LabelInfo), _) -> (painted l.color (if isEllipsis then d.vbarGap else d.vbar), " ")
+      | (_, _, _, Just ((m : LineLabel), isStart)) if isLine ->
+          let isCol = sameAs multiLabel m.info in
+          let isLimit = col == n in
+          let c = m.info.color in
+          let first = if isLimit then d.rarrow else if isCol then (if isStart then d.ltop else d.lcross) else d.hbar in
+          (painted c first, painted c (if isLimit then ' ' else d.hbar))
+      | _ -> (" ", " ")
+
+-- The margin before a line of the report: the crate's `write_margin`.
+fun margin (x : Ctx) idx isLine isEllipsis drawLabels reportRow lineLabels marginLabel =
+  let cfg = x.cfg in
+  let d = x.draw in
+  let lineNo =
+    if isLine and not isEllipsis
+    then
+      let no = "${idx + 1}" in
+      fg (marginColor cfg) "${spaces (x.lineNoWidth - S.charLength no)}${no} ${ch d.vbar}"
+    else fg (skippedMarginColor cfg) "${spaces (x.lineNoWidth + 1)}${ch (if isEllipsis then d.vbarGap else d.vbar)}"
+  in
+  let head = " ${lineNo}${if cfg.compact then "" else " "}" in
+  if not drawLabels
+  then head
+  else
+    let n = V.len x.multiWithMsg in
+    let cols = if n > 0 then n + 1 else 0 in
+    let lineSpan =
+      match line idx x.src with
+      | Just l -> lineSpan l
+      | None -> (0, 0)
+    in
+    let parts =
+      V.map
+        (\col ->
+          match marginColumn x col isLine isEllipsis reportRow lineLabels marginLabel lineSpan with
+          | (a, b) -> if cfg.compact then a else a ++ b)
+        (V.range 0 cols)
+    in
+    head ++ S.concatAll parts
+
+-- The labels on line `l`, and the multi-line label shown in its margin.
+fun labelsOnLine (x : Ctx) (labels : [LabelInfo]) (l : Line) =
+  let ls = lineSpan l in
+  let atLine =
+    \(label : LabelInfo) ->
+      if within ls label.start
+      then Just (LineLabel { col = label.start - l.offset, info = label, multi = True, drawMsg = False })
+      else if within ls (lastOffset label)
+      then Just (LineLabel { col = lastOffset label - l.offset, info = label, multi = True, drawMsg = True })
+      else None
+  in
+  let candidates =
+    V.foldl
+      (\acc label ->
+        match atLine label with
+        | Just ll -> V.pushBack acc ll
+        | None -> acc)
+      V.empty
+      x.multiWithMsg
+  in
+  let marginLabel = firstLeast (\(ll : LineLabel) -> (ll.col, 0 - ll.info.start)) candidates in
+  let multis =
+    V.foldl
+      (\acc (label : LabelInfo) ->
+        if within ls label.start and not (isMargin marginLabel label)
+        then V.pushBack acc (LineLabel { col = label.start - l.offset, info = label, multi = True, drawMsg = False })
+        else if within ls (lastOffset label)
+        then
+          V.pushBack acc (LineLabel { col = lastOffset label - l.offset, info = label, multi = True, drawMsg = True })
+        else acc)
+      V.empty
+      x.multiWithMsg
+  in
+  let cfg = x.cfg in
+  let inline =
+    V.foldl
+      (\acc (label : LabelInfo) ->
+        if label.start >= fst ls and label.stop <= snd ls and not label.multi
+        then
+          let attach =
+            match cfg.labelAttach with
+            | LabelAttach.Start -> label.start
+            | LabelAttach.Middle -> (label.start + label.stop) / 2
+            | LabelAttach.End -> lastOffset label
+          in
+          V.pushBack
+            acc
+            (LineLabel { col = max attach label.start - l.offset, info = label, multi = False, drawMsg = True })
+        else acc)
+      multis
+      labels
+  in
+  (inline, marginLabel)
+
+fun lineLabelOrder (a : LineLabel) (b : LineLabel) =
+  if a.info.order != b.info.order
+  then compare a.info.order b.info.order
+  else if a.col != b.col
+  then compare a.col b.col
+  else compare b.info.start a.info.start
+
+-- The label drawing a vertical bar at `col` in arrow row `row`.
+fun vbarAt (lineLabels : [LineLabel]) marginLabel col row =
+  let rec go j =
+    match V.get lineLabels j with
+    | None -> None
+    | Just (ll : LineLabel) ->
+        if isSome ll.info.msg and not (isMargin marginLabel ll.info) and ll.col == col and row <= j
+        then Just ll
+        else go (j + 1)
+  in
+  go 0
+
+fun byPriority (l : LabelInfo) = (0 - l.priority, infoLen l)
+
+-- The width of column `col` of a line whose characters are `cs`.
+fun widthAt cfg cs col = if col < arrayLen cs then snd (charWidthAt cfg (arrayGet cs col) col) else 1
+
+-- One line of source with its labels: the source text and the arrows below
+-- it.
+fun drawLine (x : Ctx) (multiLabels : [LabelInfo]) idx isEllipsis (l : Line) lineLabels0 marginLabel =
+  let cfg = x.cfg in
+  let d = x.draw in
+  let lineLabels = stableSortBy lineLabelOrder lineLabels0 in
+  let arrowEndSpace = if cfg.compact then 1 else 2 in
+  let arrowLen =
+    V.foldl
+      (\acc (ll : LineLabel) -> if ll.multi then l.charLen else max acc (max 0 (ll.info.stop - l.offset)))
+      0
+      lineLabels
+      + arrowEndSpace
+  in
+  let highlightAt =
+    \col ->
+      let offset = l.offset + col in
+      let fromMargin =
+        match marginLabel with
+        | Just (m : LineLabel) -> [m.info]
+        | None -> []
+      in
+      let all = V.append (V.append fromMargin multiLabels) (V.map (\(ll : LineLabel) -> ll.info) lineLabels) in
+      firstLeast byPriority (V.filter (\(i : LabelInfo) -> covers i offset) all)
+  in
+  let underlineAt =
+    \col ->
+      let offset = l.offset + col in
+      firstLeast
+        (\(ll : LineLabel) -> byPriority ll.info)
+        (V.filter (\(ll : LineLabel) -> cfg.underlines and not ll.multi and covers ll.info offset) lineLabels)
+  in
+  let cs = trimmedChars (lineText l x.src) in
+  let head = margin x idx True isEllipsis True None lineLabels marginLabel in
+  let text =
+    if isEllipsis
+    then ""
+    else
+      S.concatAll
+        (V.map
+          (\col ->
+            let color =
+              match highlightAt col with
+              | Just (h : LabelInfo) -> h.color
+              | None -> unimportantColor cfg
+            in
+            match charWidthAt cfg (arrayGet cs col) col with
+            | (c, w) -> if isWhitespace c then S.repeat (painted color c) w else painted color c)
+          (V.range 0 (arrayLen cs)))
+  in
+  let repeatCell = \c tail w -> if w > 0 then c ++ S.repeat tail (w - 1) else "" in
+  let arrows =
+    V.map
+      (\row ->
+        let ll = V.getOr (LineLabel { col = 0, info = dummyInfo, multi = False, drawMsg = False }) lineLabels row in
+        let msg = ll.info.msg in
+        if not (isSome msg)
+        then ""
+        else
+          let gap =
+            if cfg.compact
+            then ""
+            else
+              let cells =
+                V.map
+                  (\col ->
+                    let w = widthAt cfg cs col in
+                    let underline = if row == 0 then underlineAt col else None in
+                    let parts =
+                      match (vbarAt lineLabels marginLabel col row, underline) with
+                      | (Just (v : LineLabel), Just _) ->
+                          (painted v.info.color d.underbar, painted v.info.color d.underline)
+                      | (Just (v : LineLabel), None) ->
+                          if v.multi and row == 0 and cfg.multilineArrows
+                          then (painted v.info.color d.uarrow, painted v.info.color ' ')
+                          else (painted v.info.color d.vbar, painted v.info.color ' ')
+                      | (None, Just (u : LineLabel)) ->
+                          (painted u.info.color d.underline, painted u.info.color d.underline)
+                      | (None, None) -> (" ", " ")
+                    in
+                    match parts with
+                    | (c, tail) -> if w > 0 then c ++ S.repeat tail (w - 1) else "")
+                  (V.range 0 arrowLen)
+              in
+              "${margin x idx False isEllipsis True (Just (row, False)) lineLabels marginLabel}${S.concatAll cells}\n"
+          in
+          let color = ll.info.color in
+          let cells =
+            V.map
+              (\col ->
+                let w = widthAt cfg cs col in
+                let isHbar = ((col > ll.col) != ll.multi) or (ll.drawMsg and col > ll.col) in
+                let parts =
+                  if col == ll.col and not (isMargin marginLabel ll.info)
+                  then
+                    let corner = if ll.multi then (if ll.drawMsg then d.mbot else d.rbot) else d.lbot in
+                    (painted color corner, painted color d.hbar)
+                  else
+                    match vbarAt lineLabels marginLabel col row with
+                    | Just (v : LineLabel) ->
+                        if not cfg.crossGap and isHbar
+                        then (painted color d.xbar, painted color ' ')
+                        else if isHbar
+                        then (painted color d.hbar, painted color d.hbar)
+                        else
+                          let c = if v.multi and row == 0 and cfg.compact then d.uarrow else d.vbar in
+                          (painted v.info.color c, painted color ' ')
+                    | None -> if isHbar then (painted color d.hbar, painted color d.hbar) else (" ", " ")
+                in
+                match parts with
+                | (c, tail) -> repeatCell c tail w)
+              (V.range 0 arrowLen)
+          in
+          let message =
+            if ll.drawMsg
+            then
+              match msg with
+              | Just m -> " ${m}"
+              | None -> " "
+            else ""
+          in
+          let arrowMargin = margin x idx False isEllipsis True (Just (row, True)) lineLabels marginLabel in
+          "${gap}${arrowMargin}${S.concatAll cells}${message}\n")
+      (V.range 0 (V.len lineLabels))
+  in
+  "${head}${text}\n${S.concatAll arrows}"
+
+def dummyInfo =
+  LabelInfo {
+    id = 0 - 1,
+    multi = False,
+    start = 0,
+    stop = 0,
+    msg = None,
+    color = None,
+    order = 0,
+    priority = 0,
+    line = 0
+  }
+
+-- The source lines of one group, with their labels.
+fun drawLines (x : Ctx) (labels : [LabelInfo]) (multiLabels : [LabelInfo]) (first, stop) =
+  let rec go idx isEllipsis acc =
+    if idx >= stop
+    then acc
+    else
+      match line idx x.src with
+      | None -> go (idx + 1) isEllipsis acc
+      | Just l ->
+          match labelsOnLine x labels l with
+          | (lineLabels, marginLabel) ->
+              if V.isEmpty lineLabels and not (isSome marginLabel)
+              then
+                let withinLabel = V.any (\(m : LabelInfo) -> covers m l.offset) multiLabels in
+                if not isEllipsis and withinLabel
+                then go (idx + 1) True (V.pushBack acc (drawLine x multiLabels idx True l lineLabels marginLabel))
+                else
+                  let blank =
+                    if not x.cfg.compact and not isEllipsis
+                    then "${margin x idx False isEllipsis False None V.empty None}\n"
+                    else ""
+                  in
+                  go (idx + 1) True (V.pushBack acc blank)
+              else go (idx + 1) False (V.pushBack acc (drawLine x multiLabels idx False l lineLabels marginLabel))
+  in
+  S.concatAll (go first False V.empty)
+
+-- Help or notes, under the last group: `name` is "Help" or "Note".
+fun drawTrailers (x : Ctx) name items =
+  let cfg = x.cfg in
+  let count = V.len items in
+  let plain = \() -> margin x 0 False False True (Just (0, False)) V.empty None in
+  S.concatAll
+    (V.map
+      (\(i, item) ->
+        let prefix = "${name} ${i + 1}" in
+        let prefixLen = if count > 1 then S.byteLength prefix else 4 in
+        let gap = if cfg.compact then "" else "${plain ()}\n" in
+        let ls = rustLines item in
+        let first =
+          match V.get ls 0 with
+          | Just l ->
+              let title = if count > 1 then prefix else name in
+              "${plain ()}${fg (noteColor cfg) title}: ${l}\n"
+          | None -> ""
+        in
+        let rest = V.map (\l -> "${plain ()}${spaces (prefixLen + 2)}${l}\n") (V.drop ls 1) in
+        "${gap}${first}${S.concatAll rest}")
+      (V.zip (V.range 0 count) items))
+
+-- The number of decimal digits in `n`, and 1 for 0.
+fun digitCount n = if n < 10 then 1 else 1 + digitCount (n / 10)
+
+fun sourceName (cache : Cache id) sourceId =
+  match cache.display sourceId with
+  | Just name -> name
+  | None -> "<unknown>"
+
+-- The report, drawn with the sources from `cache`, as the crate writes it. A
+-- label whose source the cache does not have is left out, where the crate
+-- would also print a warning.
+@pub fun render (r : Report id) (cache : Cache id) =
+  let cfg = r.config in
+  let d =
+    match cfg.charSet with
+    | CharSet.Unicode -> unicodeCharacters
+    | CharSet.Ascii -> asciiCharacters
+  in
+  let code =
+    match r.code with
+    | Just c -> "[${c}] "
+    | None -> ""
+  in
+  let kindColor =
+    match r.kind with
+    | ReportKind.Error -> errorColor cfg
+    | ReportKind.Warning -> warningColor cfg
+    | ReportKind.Advice -> adviceColor cfg
+    | ReportKind.Custom _ c -> Just c
+  in
+  let message =
+    match r.msg with
+    | Just m -> m
+    | None -> ""
+  in
+  let header = "${fg kindColor "${code}${kindName r.kind}:"} ${message}\n" in
+  let groups = sourceGroups r cache in
+  let lineNoWidth =
+    V.foldl
+      (\w (g : Group id) ->
+        let range = lineRange (Span { source = g.source, start = g.start, stop = g.stop }) g.src in
+        max w (digitCount (snd range)))
+      0
+      groups
+  in
+  let groupCount = V.len groups in
+  let drawGroup =
+    \(gi, (g : Group id)) ->
+      let src = g.src in
+      let range = lineRange (Span { source = g.source, start = g.start, stop = g.stop }) src in
+      let firstLabel = V.getOr dummyInfo g.labels 0 in
+      let location = if g.source == r.span.source then r.span.start else firstLabel.start in
+      let lineAndCol =
+        match cfg.indexType with
+        | IndexType.Char -> offsetLine location src
+        | IndexType.Byte ->
+            match byteLine location src with
+            | Just (l, idx, col) -> Just (l, idx, charsBefore (lineText l src) col)
+            | None -> None
+      in
+      let lineRef =
+        match lineAndCol with
+        | Just (_, idx, col) -> "${sourceName cache g.source}:${idx + 1 + src.displayLineOffset}:${col + 1}"
+        | None -> "${sourceName cache g.source}:?:?"
+      in
+      let margins = marginColor cfg in
+      let corner = if gi == 0 then d.ltop else d.lcross in
+      let opening = "${painted margins corner}${painted margins d.hbar}${painted margins d.lbox}" in
+      let top = "${spaces (lineNoWidth + 2)}${opening} ${lineRef} ${painted margins d.rbox}\n" in
+      let bar = if cfg.compact then "" else "${spaces (lineNoWidth + 2)}${painted margins d.vbar}\n" in
+      let byLength = \(a : LabelInfo) (b : LabelInfo) -> compare (infoLen b) (infoLen a) in
+      let multiLabels = stableSortBy byLength (V.filter (\(l : LabelInfo) -> l.multi) g.labels) in
+      let multiWithMsg = V.filter (\(l : LabelInfo) -> isSome l.msg) multiLabels in
+      let x = Ctx { cfg = cfg, draw = d, lineNoWidth = lineNoWidth, src = src, multiWithMsg = multiWithMsg } in
+      let body = drawLines x g.labels multiLabels range in
+      let isFinal = gi + 1 == groupCount in
+      let trailers = if isFinal then drawTrailers x "Help" r.help ++ drawTrailers x "Note" r.notes else "" in
+      let tail =
+        if cfg.compact
+        then ""
+        else if isFinal
+        then "${fg margins "${S.repeat (ch d.hbar) (lineNoWidth + 2)}${ch d.rbot}"}\n"
+        else "${spaces (lineNoWidth + 2)}${painted margins d.vbar}\n"
+      in
+      "${top}${bar}${body}${trailers}${tail}"
+  in
+  header ++ S.concatAll (V.map drawGroup (V.zip (V.range 0 groupCount) groups))
+
+-- Prints the report to the console. The crate's `eprint` writes to standard
+-- error, which Meadow's console does not have.
+@pub fun print (r : Report id) (cache : Cache id) = writeOutput (render r cache)

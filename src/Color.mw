@@ -1,0 +1,116 @@
+-- Colours: the terminal colours a report is drawn in, how text is painted
+-- with them, and the crate's generator of distinct label colours. The crate
+-- paints with `yansi`; this module writes the same escape sequences.
+--
+-- Copyright Joshua Barretto and the ariadne contributors, and the Meadow
+-- port's authors. Licensed under MIT: see LICENSE and COPYRIGHT.
+
+use Std.Collections.Vector as V
+
+-- A terminal colour: the terminal's own default, one of the sixteen named
+-- colours, one of the 256 numbered ones, or an RGB triple.
+@pub data Color =
+  | Primary
+  | Fixed Int
+  | Rgb Int Int Int
+  | Black
+  | Red
+  | Green
+  | Yellow
+  | Blue
+  | Magenta
+  | Cyan
+  | White
+  | BrightBlack
+  | BrightRed
+  | BrightGreen
+  | BrightYellow
+  | BrightBlue
+  | BrightMagenta
+  | BrightCyan
+  | BrightWhite
+
+-- The SGR parameters that set `c` as the foreground (`base` 30) or the
+-- background (`base` 40).
+fun sgr base c =
+  match c with
+  | Color.Primary -> "${base + 9}"
+  | Color.Fixed n -> "${base + 8};5;${n}"
+  | Color.Rgb r g b -> "${base + 8};2;${r};${g};${b}"
+  | Color.Black -> "${base}"
+  | Color.Red -> "${base + 1}"
+  | Color.Green -> "${base + 2}"
+  | Color.Yellow -> "${base + 3}"
+  | Color.Blue -> "${base + 4}"
+  | Color.Magenta -> "${base + 5}"
+  | Color.Cyan -> "${base + 6}"
+  | Color.White -> "${base + 7}"
+  | Color.BrightBlack -> "${base + 60}"
+  | Color.BrightRed -> "${base + 61}"
+  | Color.BrightGreen -> "${base + 62}"
+  | Color.BrightYellow -> "${base + 63}"
+  | Color.BrightBlue -> "${base + 64}"
+  | Color.BrightMagenta -> "${base + 65}"
+  | Color.BrightCyan -> "${base + 66}"
+  | Color.BrightWhite -> "${base + 67}"
+
+-- `text` in the foreground colour `color`, or plain when there is none: the
+-- crate's `Fmt::fg`.
+@pub fun fg color text =
+  match color with
+  | Just c -> "\u{1B}[${sgr 30 c}m${text}\u{1B}[0m"
+  | None -> text
+
+-- `text` on the background colour `color`, or plain when there is none: the
+-- crate's `Fmt::bg`.
+@pub fun bg color text =
+  match color with
+  | Just c -> "\u{1B}[${sgr 40 c}m${text}\u{1B}[0m"
+  | None -> text
+
+-- A source of colours for labels, each unlike the last: the crate's
+-- `ColorGenerator`. Its colours are among the 256 numbered ones.
+@pub record ColorGenerator = { state : (Int, Int, Int), minBrightness : Float32 }
+
+-- A generator from a state of three 16-bit numbers, making colours no darker
+-- than `minBrightness`, which is clamped to `[0, 1]`.
+@pub fun colorGeneratorFrom (a, b, c) (minBrightness : Float32) =
+  let zero = toFloat32 0.0 in
+  let one = toFloat32 1.0 in
+  let atLeastZero = if minBrightness >=. zero then minBrightness else zero in
+  let clamped = if atLeastZero <=. one then atLeastZero else one in
+  ColorGenerator { state = (a % 65536, b % 65536, c % 65536), minBrightness = clamped }
+
+-- The generator the crate starts from by default.
+@pub def colorGenerator = colorGeneratorFrom (30000, 15000, 35000) (toFloat32 0.5)
+
+-- One step of one of the three 16-bit states.
+fun stepState s i = (s + 40503 * (i * 4 + 1130)) % 65536
+
+-- A state as a brightness in `[minBrightness, 1]`, in 32-bit arithmetic.
+fun brightness (s : Int) (m : Float32) = toFloat32 (toFloat s) /. toFloat32 65535.0 *. (toFloat32 1.0 -. m) +. m
+
+-- The next colour, and the generator to take the one after it from.
+@pub fun nextColor (g : ColorGenerator) =
+  match g.state with
+  | (a, b, c) ->
+      let s0 = stepState a 0 in
+      let s1 = stepState b 1 in
+      let s2 = stepState c 2 in
+      let m = g.minBrightness in
+      let sum =
+        brightness s2 m *. toFloat32 5.0 +. brightness s1 m *. toFloat32 30.0 +. brightness s0 m *. toFloat32 180.0
+      in
+      let index = 16 + floor (toFloat64 sum) in
+      (Color.Fixed (if index > 255 then 255 else index), { g | state = (s0, s1, s2) })
+
+-- The next `n` colours, and the generator after them.
+@pub fun nextColors n (g : ColorGenerator) =
+  let rec go k acc gen =
+    if k >= n
+    then (acc, gen)
+    else
+      match nextColor gen with
+      | (c, after) -> go (k + 1) (V.pushBack acc c) after
+  in
+  go 0 V.empty g

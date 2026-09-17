@@ -1,0 +1,433 @@
+-- The port against the crate: every report in `Cases.mw`, built by the same
+-- steps as the crate built it and drawn as the crate drew it; the colours of
+-- colour generators; and texts split into lines. Plus a few examples.
+--
+-- Every declaration carries `@cfg(test)`, as the tests are no part of the
+-- package.
+
+@cfg(test)
+use Std.Test (assertEq)
+@cfg(test)
+use Std.Collections.Vector as V
+@cfg(test)
+use Std.String as S
+@cfg(test)
+use ariadne.Cases (reports, colors, lines)
+@cfg(test)
+use ariadne.Color
+@cfg(test)
+use ariadne.Color.Color.*
+@cfg(test)
+use ariadne.Source
+@cfg(test)
+use ariadne.Report
+@cfg(test)
+use ariadne.Report.ReportKind.*
+@cfg(test)
+use ariadne.Write (render)
+
+-- --- reading ------------------------------------------------------------------------------
+
+@cfg(test)
+fun num s i n =
+  let rec go k acc = if k >= n then acc else go (k + 1) (acc * 64 + (toInt (stringByteAt s (i + k)) - 48)) in
+  (go 0 0, i + n)
+
+@cfg(test)
+fun signedNum s i n =
+  match num s i n with
+  | (v, next) -> (v - bit (6 * n - 1), next)
+
+@cfg(test)
+fun str s i =
+  let len = fst (num s i 3) in
+  (stringSlice s (i + 3) (i + 3 + len), i + 3 + len)
+
+@cfg(test)
+fun flag s i =
+  match num s i 1 with
+  | (n, next) -> (n == 1, next)
+
+-- Runs `f` `n` times from `i`, threading `acc` through.
+@cfg(test)
+fun times n i acc f =
+  let rec go k at a =
+    if k >= n
+    then (a, at)
+    else
+      match f at a with
+      | (a2, next) -> go (k + 1) next a2
+  in
+  go 0 i acc
+
+@cfg(test)
+def namedColors =
+  [ Primary,
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite ]
+
+@cfg(test)
+fun readColor s i =
+  match num s i 1 with
+  | (17, next) ->
+      let v = num s next 2 in
+      (Fixed (fst v), snd v)
+  | (18, next) ->
+      let r = num s next 2 in
+      let g = num s (snd r) 2 in
+      let b = num s (snd g) 2 in
+      (Rgb (fst r) (fst g) (fst b), snd b)
+  | (k, next) -> (V.getOr Primary namedColors k, next)
+
+@cfg(test)
+def attaches = [LabelAttach.Start, LabelAttach.Middle, LabelAttach.End]
+
+@cfg(test)
+fun readConfig s i =
+  let crossGap = flag s i in
+  let compact = flag s (snd crossGap) in
+  let underlines = flag s (snd compact) in
+  let arrows = flag s (snd underlines) in
+  let color = flag s (snd arrows) in
+  let ascii = flag s (snd color) in
+  let bytes = flag s (snd ascii) in
+  let attach = num s (snd bytes) 1 in
+  let tabs = num s (snd attach) 1 in
+  let c =
+    config
+      |> withCrossGap (fst crossGap)
+      |> withLabelAttach (V.getOr LabelAttach.Middle attaches (fst attach))
+      |> withCompact (fst compact)
+      |> withUnderlines (fst underlines)
+      |> withMultilineArrows (fst arrows)
+      |> withColor (fst color)
+      |> withTabWidth (fst tabs)
+      |> withCharSet (if fst ascii then CharSet.Ascii else CharSet.Unicode)
+      |> withIndexType (if fst bytes then IndexType.Byte else IndexType.Char)
+  in
+  (c, snd tabs)
+
+@cfg(test)
+fun readMaybe s i f =
+  match flag s i with
+  | (True, next) ->
+      (match f next with
+       | (x, after) -> (Just x, after))
+  | (False, next) -> (None, next)
+
+@cfg(test)
+fun readLabel s i mkId =
+  let src = num s i 1 in
+  let start = num s (snd src) 2 in
+  let stop = num s (snd start) 2 in
+  let msg = readMaybe s (snd stop) (\at -> str s at) in
+  let color = readMaybe s (snd msg) (\at -> readColor s at) in
+  let order = signedNum s (snd color) 1 in
+  let priority = signedNum s (snd order) 1 in
+  let l0 = label (spanIn (mkId (fst src)) (fst start) (fst stop)) in
+  let l1 =
+    match fst msg with
+    | Just m -> labelMessage m l0
+    | None -> l0
+  in
+  let l2 =
+    match fst color with
+    | Just c -> labelColor c l1
+    | None -> l1
+  in
+  (l2 |> labelOrder (fst order) |> labelPriority (fst priority), snd priority)
+
+@cfg(test)
+fun readStrings s i =
+  let n = num s i 1 in
+  times (fst n) (snd n) V.empty (\at acc ->
+    let m = str s at in
+    (V.pushBack acc (fst m), snd m))
+
+@cfg(test)
+fun readLabels s i mkId =
+  let n = num s i 1 in
+  times (fst n) (snd n) V.empty (\at acc ->
+    let l = readLabel s at mkId in
+    (V.pushBack acc (fst l), snd l))
+
+-- One building step, applied to `r`.
+@cfg(test)
+fun readStep s i mkId r =
+  let tag = num s i 1 in
+  let at = snd tag in
+  match fst tag with
+  | 0 -> mapFst (\c -> withCode c r) (str s at)
+  | 1 -> mapFst (\n -> withNumericCode n r) (signedNum s at 2)
+  | 2 -> mapFst (\m -> withMessage m r) (str s at)
+  | 3 -> mapFst (\m -> withNote m r) (str s at)
+  | 4 -> mapFst (\m -> withHelp m r) (str s at)
+  | 5 -> mapFst (\m -> setNote m r) (str s at)
+  | 6 -> mapFst (\m -> setHelp m r) (str s at)
+  | 7 -> mapFst (\c -> withConfig c r) (readConfig s at)
+  | 8 -> mapFst (\ms -> withNotes ms r) (readStrings s at)
+  | 9 -> mapFst (\ms -> withHelps ms r) (readStrings s at)
+  | 10 -> mapFst (\l -> withLabel l r) (readLabel s at mkId)
+  | _ -> mapFst (\ls -> withLabels ls r) (readLabels s at mkId)
+
+-- The report's kind and span, and the steps that build it.
+@cfg(test)
+fun readReport s i mkId =
+  let kindTag = num s i 1 in
+  let kind =
+    match fst kindTag with
+    | 0 -> (Error, snd kindTag)
+    | 1 -> (Warning, snd kindTag)
+    | 2 -> (Advice, snd kindTag)
+    | _ ->
+        let name = str s (snd kindTag) in
+        let color = readColor s (snd name) in
+        (Custom (fst name) (fst color), snd color)
+  in
+  let src = num s (snd kind) 1 in
+  let start = num s (snd src) 2 in
+  let stop = num s (snd start) 2 in
+  let steps = num s (snd stop) 1 in
+  let r0 = build (fst kind) (spanIn (mkId (fst src)) (fst start) (fst stop)) in
+  times (fst steps) (snd steps) r0 (\at r -> readStep s at mkId r)
+
+-- --- checking -----------------------------------------------------------------------------
+
+@cfg(test)
+fun readSource s i =
+  let name = str s i in
+  let body = str s (snd name) in
+  let offset = num s (snd body) 2 in
+  ((fst name, withDisplayLineOffset (fst offset) (source (fst body))), snd offset)
+
+@cfg(test)
+def noSource = ("", source "")
+
+-- A report of `reports` at `i`: what the crate drew, what the port draws, and
+-- where the next report starts.
+@cfg(test)
+fun runReport i =
+  let s = reports in
+  let withIds = flag s i in
+  let count = num s (snd withIds) 1 in
+  let read =
+    times (fst count) (snd count) V.empty (\at acc ->
+      let p = readSource s at in
+      (V.pushBack acc (fst p), snd p))
+  in
+  let srcs = fst read in
+  if fst withIds
+  then
+    let mkId = \k -> if k < V.len srcs then fst (V.getOr noSource srcs k) else "missing.rs" in
+    let cache =
+      Cache {
+        fetch =
+          \id ->
+            match V.find (\(name, _) -> name == id) srcs with
+            | Just (_, src) -> Ok src
+            | None -> Err "missing",
+        display = \id -> Just id
+      }
+    in
+    let built = readReport s (snd read) mkId in
+    let want = str s (snd built) in
+    (fst want, render (fst built) cache, snd want)
+  else
+    let cache = sourceCache (snd (V.getOr noSource srcs 0)) in
+    let built = readReport s (snd read) (\_ -> ()) in
+    let want = str s (snd built) in
+    (fst want, render (fst built) cache, snd want)
+
+@cfg(test)
+fun checkReports i n bad =
+  if i >= stringByteLength reports
+  then (n, bad)
+  else
+    match runReport i with
+    | (want, got, next) -> checkReports next (n + 1) (if want == got then bad else V.pushBack bad (n, want, got))
+
+-- The number of reports, and the first few the port draws differently.
+@cfg(test)
+@test fun reportsMatchTheCrate () =
+  match checkReports 0 0 V.empty with
+  | (n, bad) -> assertEq (n, V.take bad 2) (1200, []) "reports the port and ariadne draw differently"
+
+@cfg(test)
+fun brightnessOf kind m =
+  let magnitude = toFloat m /. 65536.0 in
+  match kind with
+  | 0 -> toFloat32 magnitude
+  | 1 -> toFloat32 0.0 /. toFloat32 0.0
+  | _ -> toFloat32 (0.0 -. magnitude)
+
+@cfg(test)
+fun fixedValue color =
+  match color with
+  | Fixed v -> v
+  | _ -> 0 - 1
+
+@cfg(test)
+fun runColors i =
+  let s = colors in
+  let a = num s i 3 in
+  let b = num s (snd a) 3 in
+  let c = num s (snd b) 3 in
+  let kind = num s (snd c) 1 in
+  let m = num s (snd kind) 3 in
+  let n = num s (snd m) 1 in
+  let want =
+    times (fst n) (snd n) V.empty (\at acc ->
+      let v = num s at 2 in
+      (V.pushBack acc (fst v), snd v))
+  in
+  let g = colorGeneratorFrom (fst a, fst b, fst c) (brightnessOf (fst kind) (fst m)) in
+  let got = V.map fixedValue (fst (nextColors (fst n) g)) in
+  (fst want, got, snd want)
+
+@cfg(test)
+fun checkColors i n bad =
+  if i >= stringByteLength colors
+  then (n, bad)
+  else
+    match runColors i with
+    | (want, got, next) -> checkColors next (n + 1) (if want == got then bad else V.pushBack bad (n, want, got))
+
+@cfg(test)
+@test fun colorsMatchTheCrate () =
+  match checkColors 0 0 V.empty with
+  | (n, bad) -> assertEq (n, V.take bad 2) (200, []) "colour generators the port and ariadne differ on"
+
+@cfg(test)
+fun showFound found =
+  match found with
+  | Just ((l : Line), idx, col) -> "${l.offset}/${idx}/${col}"
+  | None -> "none"
+
+@cfg(test)
+fun readQuery s i =
+  let offset = num s i 2 in
+  let found = flag s (snd offset) in
+  if fst found
+  then
+    let lo = num s (snd found) 2 in
+    let idx = num s (snd lo) 2 in
+    let col = num s (snd idx) 2 in
+    ((fst offset, "${fst lo}/${fst idx}/${fst col}"), snd col)
+  else ((fst offset, "none"), snd found)
+
+@cfg(test)
+fun runLines i =
+  let s = lines in
+  let body = str s i in
+  let src = source (fst body) in
+  let count = num s (snd body) 2 in
+  let wantLines =
+    times (fst count) (snd count) V.empty (\at acc ->
+      let offset = num s at 2 in
+      let len = num s (snd offset) 2 in
+      let text = str s (snd len) in
+      (V.pushBack acc "${fst offset}/${fst len}/${fst text}", snd text))
+  in
+  let len = num s (snd wantLines) 2 in
+  let queries =
+    times 6 (snd len) V.empty (\at acc ->
+      let q = readQuery s at in
+      (V.pushBack acc (fst q), snd q))
+  in
+  let range =
+    times 4 (snd queries) V.empty (\at acc ->
+      let v = num s at 2 in
+      (V.pushBack acc (fst v), snd v))
+  in
+  let r = fst range in
+  let want = (fst wantLines, fst len, V.map snd (fst queries), V.drop r 2) in
+  let gotLines = V.map (\(l : Line) -> "${l.offset}/${l.charLen}/${lineText l src}") (sourceLines src) in
+  let gotQueries =
+    V.map
+      (\(q, (offset, _)) -> showFound (if q % 2 == 1 then byteLine offset src else offsetLine offset src))
+      (V.zip (V.range 0 6) (fst queries))
+  in
+  let lr = lineRange (span (V.getOr 0 r 0) (V.getOr 0 r 1)) src in
+  let got = (gotLines, sourceLen src, gotQueries, [fst lr, snd lr]) in
+  (want, got, snd range)
+
+@cfg(test)
+fun checkLines i n bad =
+  if i >= stringByteLength lines
+  then (n, bad)
+  else
+    match runLines i with
+    | (want, got, next) -> checkLines next (n + 1) (if want == got then bad else V.pushBack bad (n, want, got))
+
+@cfg(test)
+@test fun linesMatchTheCrate () =
+  match checkLines 0 0 V.empty with
+  | (n, bad) -> assertEq (n, V.take bad 2) (300, []) "texts the port and ariadne split differently"
+
+-- --- examples -----------------------------------------------------------------------------
+
+@cfg(test)
+@test fun examples () =
+  let r =
+    build Error (spanIn "a.mw" 8 11)
+      |> withMessage "unknown name"
+      |> withConfig (config |> withColor False)
+      |> withLabel (label (spanIn "a.mw" 8 11) |> labelMessage "not in scope")
+  in
+  let out = render r (sources [("a.mw", "def x = foo\n")]) in
+  assertEq
+    (S.split "\n" out)
+    [ "Error: unknown name",
+      "   ╭─[ a.mw:1:9 ]",
+      "   │",
+      " 1 │ def x = foo",
+      "   │         ─┬─  ",
+      "   │          ╰─── not in scope",
+      "───╯",
+      "" ]
+    "a report with one label"
+
+-- The README's example, as the crate draws it.
+@cfg(test)
+@test fun readmeExample () =
+  let text = "fun add x y = x + y\n\ndef main = add 1 \"two\"\n" in
+  let report =
+    build Error (spanIn "main.mw" 38 43)
+      |> withConfig (config |> withColor False)
+      |> withNumericCode 3
+      |> withMessage "mismatched types"
+      |> withLabel (label (spanIn "main.mw" 4 7) |> labelMessage "`add` takes `Int`s")
+      |> withLabel (label (spanIn "main.mw" 38 43) |> labelMessage "this is a `String`")
+      |> withNote "convert it with `toInt`"
+  in
+  assertEq
+    (S.split "\n" (render report (namedSource "main.mw" (source text))))
+    [ "[03] Error: mismatched types",
+      "   ╭─[ main.mw:3:18 ]",
+      "   │",
+      " 1 │ fun add x y = x + y",
+      "   │     ─┬─  ",
+      "   │      ╰─── `add` takes `Int`s",
+      "   │ ",
+      " 3 │ def main = add 1 \"two\"",
+      "   │                  ──┬──  ",
+      "   │                    ╰──── this is a `String`",
+      "   │ ",
+      "   │ Note: convert it with `toInt`",
+      "───╯",
+      "" ]
+    "the README's report"

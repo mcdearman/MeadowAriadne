@@ -1,0 +1,10 @@
+ariadne (the Meadow package) is a port of the Rust crate ariadne
+(https://github.com/zesterer/ariadne), version 0.6.0, by Joshua Barretto and
+contributors, to Meadow. It paints text as yansi 1.0.1
+(https://github.com/SergioBenitez/yansi), by Sergio Benitez, does. Its test
+cases are generated from those crates, and its code is translated from their
+source.
+
+ariadne is licensed under the MIT license, and so is this port: see LICENSE
+(ariadne's). yansi is licensed under the MIT or Apache-2.0 licenses, and the
+part of it this port follows is used under the MIT license: see LICENSE-yansi.
