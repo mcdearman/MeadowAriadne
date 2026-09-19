@@ -1,0 +1,6 @@
+[package]
+name = "Ariadne"
+version = "0.2.0"
+
+[dependencies]
+UnicodeWidth = { git = "https://github.com/mcdearman/MeadowUnicodeWidth", version = "0.2.0" }

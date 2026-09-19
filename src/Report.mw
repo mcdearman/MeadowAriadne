@@ -5,8 +5,8 @@
 
 use Std.Collections.Vector as V
 use Std.String as S
-use ariadne.Color
-use ariadne.Source (Span)
+use Ariadne.Color
+use Ariadne.Source (Span)
 
 -- Where a label's arrow meets its span on the line: at its first character,
 -- its middle, or its last.

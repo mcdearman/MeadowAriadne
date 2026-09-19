@@ -8,19 +8,19 @@ with notes and help. It is drawn in colour or without.
 This package is a port of Rust's
 [`ariadne`](https://github.com/zesterer/ariadne) 0.6.0. It draws reports
 character for character, and escape for escape, as the crate does. Text is
-measured with [unicodeWidth](https://github.com/mcdearman/meadow-unicode-width),
+measured with [unicodeWidth](https://github.com/mcdearman/MeadowUnicodeWidth),
 the port of the `unicode-width` version the crate uses.
 
 ## Install
 
 ```sh
-meadow add mcdearman/meadow-ariadne
+meadow add mcdearman/MeadowAriadne
 ```
 
 ## Use
 
 ```meadow
-use ariadne
+use Ariadne
 
 def text = "fun add x y = x + y\n\ndef main = add 1 \"two\"\n"
 

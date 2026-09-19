@@ -11,10 +11,10 @@ use Std.String as S
 use Std.Char as C
 use Std.Sort (stableSortBy)
 use Std.Maybe (isSome)
-use unicodeWidth (charWidth)
-use ariadne.Color
-use ariadne.Source
-use ariadne.Report
+use UnicodeWidth (charWidth)
+use Ariadne.Color
+use Ariadne.Source
+use Ariadne.Report
 
 -- --- characters ---------------------------------------------------------------------------
 

@@ -2,7 +2,7 @@
 -- text. A port of Rust's `ariadne` crate, version 0.6.0, measuring text with
 -- this ecosystem's `unicodeWidth`.
 --
---   use ariadne (build, withMessage, withLabel, label, labelMessage, spanIn, sources, render)
+--   use Ariadne (build, withMessage, withLabel, label, labelMessage, spanIn, sources, render)
 --
 --   def report =
 --     build Error (spanIn "a.mw" 8 11)
@@ -29,12 +29,12 @@ mod Cases
 @cfg(test)
 mod Tests
 
-@pub use ariadne.Color
-@pub use ariadne.Color.Color.*
-@pub use ariadne.Source
-@pub use ariadne.Report
-@pub use ariadne.Report.LabelAttach.*
-@pub use ariadne.Report.CharSet.*
-@pub use ariadne.Report.IndexType
-@pub use ariadne.Report.ReportKind.*
-@pub use ariadne.Write (Characters, unicodeCharacters, asciiCharacters, render, print)
+@pub use Ariadne.Color
+@pub use Ariadne.Color.Color.*
+@pub use Ariadne.Source
+@pub use Ariadne.Report
+@pub use Ariadne.Report.LabelAttach.*
+@pub use Ariadne.Report.CharSet.*
+@pub use Ariadne.Report.IndexType
+@pub use Ariadne.Report.ReportKind.*
+@pub use Ariadne.Write (Characters, unicodeCharacters, asciiCharacters, render, print)

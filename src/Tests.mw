@@ -12,19 +12,19 @@ use Std.Collections.Vector as V
 @cfg(test)
 use Std.String as S
 @cfg(test)
-use ariadne.Cases (reports, colors, lines)
+use Ariadne.Cases (reports, colors, lines)
 @cfg(test)
-use ariadne.Color
+use Ariadne.Color
 @cfg(test)
-use ariadne.Color.Color.*
+use Ariadne.Color.Color.*
 @cfg(test)
-use ariadne.Source
+use Ariadne.Source
 @cfg(test)
-use ariadne.Report
+use Ariadne.Report
 @cfg(test)
-use ariadne.Report.ReportKind.*
+use Ariadne.Report.ReportKind.*
 @cfg(test)
-use ariadne.Write (render)
+use Ariadne.Write (render)
 
 -- --- reading ------------------------------------------------------------------------------
 
