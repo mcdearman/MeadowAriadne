@@ -12,9 +12,9 @@ use Std.Char as C
 use Std.Sort (stableSortBy)
 use Std.Maybe (isSome)
 use UnicodeWidth (charWidth)
-use Ariadne.Color
-use Ariadne.Source
-use Ariadne.Report
+use Nettle.Color
+use Nettle.Source
+use Nettle.Report
 
 -- --- characters ---------------------------------------------------------------------------
 

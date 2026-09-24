@@ -1,4 +1,4 @@
-# ariadne
+# nettle
 
 Diagnostics for compilers and other tools that point into source text, for
 [Meadow](https://github.com/mcdearman/meadow). A report has labelled spans
@@ -8,19 +8,19 @@ with notes and help. It is drawn in colour or without.
 This package is a port of Rust's
 [`ariadne`](https://github.com/zesterer/ariadne) 0.6.0. It draws reports
 character for character, and escape for escape, as the crate does. Text is
-measured with [unicodeWidth](https://github.com/mcdearman/MeadowUnicodeWidth),
+measured with [unicodeWidth](https://github.com/mcdearman/UnicodeWidth),
 the port of the `unicode-width` version the crate uses.
 
 ## Install
 
 ```sh
-meadow add mcdearman/MeadowAriadne
+meadow add mcdearman/Nettle
 ```
 
 ## Use
 
 ```meadow
-use Ariadne
+use Nettle
 
 def text = "fun add x y = x + y\n\ndef main = add 1 \"two\"\n"
 
